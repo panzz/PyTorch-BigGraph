@@ -37,7 +37,7 @@ def convert_path(fname):
 
 def main():
     parser = argparse.ArgumentParser(description='Example on FB15k')
-    parser.add_argument('--config', default='examples/configs/fb15k_config.py',
+    parser.add_argument('--config', default='configs/fb15k_config.py',
                         help='Path to config file')
     parser.add_argument('-p', '--param', action='append', nargs='*')
     parser.add_argument('--data_dir', default='data',
@@ -53,7 +53,9 @@ def main():
 
     # download data
     data_dir = args.data_dir
-    fpath = utils.download_url(FB15K_URL, data_dir)
+    # fpath = utils.download_url(FB15K_URL, data_dir)
+    fpath = 'data/fb15k.tgz'
+    print('fpath:' + fpath)
     utils.extract_tar(fpath)
     print('Downloaded and extracted file.')
 

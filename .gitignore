@@ -1,0 +1,13 @@
+# folder
+__pycache__/
+torchbiggraph.egg-info/
+build/
+data/
+dist/
+model/
+
+# common fileformat
+*.tsv
+*.zip
+
+# special filelist

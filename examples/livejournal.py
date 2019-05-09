@@ -63,7 +63,7 @@ def random_split_file(fpath):
 def main():
     parser = argparse.ArgumentParser(description='Example on Livejournal')
     parser.add_argument('--config',
-                        default='examples/configs/livejournal_config.py',
+                        default='configs/livejournal_config.py',
                         help='Path to config file')
     parser.add_argument('-p', '--param', action='append', nargs='*')
     parser.add_argument('--data_dir', default='data',
@@ -79,7 +79,9 @@ def main():
     # download data
     data_dir = args.data_dir
     os.makedirs(data_dir, exist_ok=True)
-    fpath = utils.download_url(URL, data_dir)
+    # fpath = utils.download_url(URL, data_dir)
+    fpath = 'data/soc-LiveJournal1.txt.gz'
+    print('fpath:' + fpath)
     fpath = utils.extract_gzip(fpath)
     print('Downloaded and extracted file.')
 
