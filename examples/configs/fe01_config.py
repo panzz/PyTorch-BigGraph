@@ -6,7 +6,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-entity_base = "data/fb15k"
+entity_base = "data/fe01"
 
 
 def get_torchbiggraph_config():
@@ -14,7 +14,7 @@ def get_torchbiggraph_config():
     config = dict(
         entity_path=entity_base,
 
-        num_epochs=50,
+        num_epochs=1,
 
         entities={
             'all': {'num_partitions': 1},
@@ -30,7 +30,7 @@ def get_torchbiggraph_config():
 
         edge_paths=[],
 
-        checkpoint_path='model/fb15k',
+        checkpoint_path='model/fe01',
 
         dimension=400,
         global_emb=False,

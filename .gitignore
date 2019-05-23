@@ -2,12 +2,16 @@
 __pycache__/
 torchbiggraph.egg-info/
 build/
-data/
 dist/
 model/
+data/
 
 # common fileformat
+*.txt
 *.tsv
 *.zip
+*.png
+
 
 # special filelist
+.DS_Store
