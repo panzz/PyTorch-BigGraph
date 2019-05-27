@@ -92,10 +92,8 @@ def scatter(x, colors):
     # We create a scatter plot.
     f = plt.figure(figsize=(8, 8))
     ax = plt.subplot(aspect='equal')
-    colorlist = colors.astype(np.int)
-    # print('scatter>{}'.format(palette[colorlist]))
     sc = ax.scatter(x[:, 0], x[:, 1], lw=0, s=40,
-                    c=palette[colorlist])
+                    c=palette[colors.astype(np.int)])
     plt.xlim(-25, 25)
     plt.ylim(-25, 25)
     ax.axis('off')
@@ -111,7 +109,7 @@ def scatter(x, colors):
     #         PathEffects.Stroke(linewidth=5, foreground="w"),
     #         PathEffects.Normal()])
     #     txts.append(txt)
-
+    
     return f, ax, sc, txts
 
 
@@ -120,8 +118,8 @@ RS = 20150101
 
 def run_iris():
   # iris = load_iris() # 使用sklearn自带的测试文件
-  iris = chj_load_file_test(fdata_test, ftarget_test)
-  # iris = chj_load_file(fdata, ftarget)
+  # iris = chj_load_file_test(fdata_test, ftarget_test)
+  iris = chj_load_file(fdata, ftarget)
 
   '''
     n_components:   (default: 2) 嵌入空间的尺寸。
@@ -142,8 +140,8 @@ def run_iris():
                     请注意，不同的初始化可能会导致不同的局部最小值
                     成本函数。
   '''
-  # X_tsne = TSNE(n_components=2, learning_rate=100).fit_transform(iris.data)
-  X_tsne = TSNE(random_state=RS).fit_transform(iris.data)
+  X_tsne = TSNE(n_components=2, learning_rate=100).fit_transform(iris.data)
+  # X_tsne = TSNE(random_state=RS).fit_transform(iris.data)
   # xtslist = list(X_tsne)
   # print("xtslist:{}, {}".format(xtslist, X_tsne.tolist))
   # X_pca = PCA().fit_transform(iris.data)
@@ -154,6 +152,7 @@ def run_iris():
   for i in range(X_tsne.shape[0]):
     plt.text(X_tsne[i, 0], X_tsne[i, 1], str(iris.target[i]), color='blue', fontdict={'weight': 'bold', 'size': 9})
   plt.colorbar()
+  plt.savefig('fb15k_tsne-generated.png', format='png', transparent=True, dpi=300, pad_inches = 0)
   plt.show()
 
   # X_tsne = TSNE(learning_rate=100).fit_transform(iris.data)
@@ -171,12 +170,12 @@ def run_iris():
   # X = np.vstack([digits.data[digits.target==i]
   #              for i in range(10)])
   # Y = np.hstack([digits.target[digits.target==i]
-  #              for i in range(10)])
+  #               for i in range(10)])
   # digits_proj = TSNE(random_state=RS).fit_transform(X)
   # # print("type of Y:{}".format(type(Y) ))
   # print("finishe digits_proj!")
   # # scatter(X, Y)
-  # scatter(X_tsne, Y)
+  # scatter(X, Y)
 
   # plt.savefig('digits_tsne-generated.png', dpi=120)
   # plt.show()

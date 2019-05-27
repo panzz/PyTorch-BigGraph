@@ -24,11 +24,11 @@ from filtered_eval import FilteredRankingEvaluator
 filePath = os.path.dirname(os.path.realpath(__file__))
 fileName = os.path.basename(os.path.realpath(__file__))
 
-FB15K_URL = 'https://dl.fbaipublicfiles.com/starspace/cfe.tgz'
+DATASETS_URL = ''
 FILENAMES = {
-    'train': 'cfe/cfe-train.txt',
-    'valid': 'cfe/cfe-valid.txt',
-    'test': 'cfe/cfe-test.txt',
+    'train': 'cfe/cfe_mtr100_mte100-train.txt',
+    'valid': 'cfe/cfe_mtr100_mte100-valid.txt',
+    'test': 'cfe/cfe_mtr100_mte100-test.txt',
 }
 
 
@@ -56,10 +56,10 @@ def main():
 
     # download data
     data_dir = args.data_dir
-    # fpath = utils.download_url(FB15K_URL, data_dir)
-    fpath = filePath+'/data/cfe.tgz'
-    print('fpath:' + fpath)
-    utils.extract_tar(fpath)
+    # fpath = utils.download_url(DATASETS_URL, data_dir)
+    # fpath = filePath+'/data/cfe.tgz'
+    # print('fpath:' + fpath)
+    # utils.extract_tar(fpath)
     print('Downloaded and extracted file.')
 
     edge_paths = [os.path.join(data_dir, name) for name in FILENAMES.values()]

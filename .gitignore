@@ -5,13 +5,15 @@ build/
 dist/
 model/
 data/
+fixtures/
+.vscode/
 
 # common fileformat
 *.txt
 *.tsv
 *.zip
 *.png
-
+*.html
 
 # special filelist
 .DS_Store

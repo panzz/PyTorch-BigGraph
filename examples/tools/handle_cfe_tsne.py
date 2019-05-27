@@ -18,6 +18,7 @@ import numpy as np
 import random
 from random import choice
 from array import array
+import json
 
 from scipy.spatial.distance import squareform, pdist
 import sklearn
@@ -48,6 +49,7 @@ ftarget_test = examples_folder + '/data/cfe/cfe_label_test.tsv'
 fdata = examples_folder + '/data/cfe/cfe_data.tsv'  # "3.txt"
 ftarget = examples_folder + '/data/cfe/cfe_label.tsv'  # "4.txt"
 
+train_file = examples_folder + '/data/cfe/cfe_mtr100_mte100-train.tsv'
 
 class chj_data_test(object):
     def __init__(self, data, target):
@@ -68,61 +70,170 @@ def chj_load_file_test(fdata, ftarget):
 
 
 class chj_data(object):
-    def __init__(self, data, target):
+    def __init__(self, data, target, labels):
         self.data = data
         self.target = target
-
+        self.labels = labels
 
 def chj_load_file(fdata, ftarget):
     data = numpy.loadtxt(fdata, delimiter='\t', dtype=float32)
-    target = numpy.loadtxt(ftarget, dtype='str')  # int32)
+    labels = numpy.loadtxt(ftarget, delimiter='\t', usecols=(0), dtype='str')
+    target = numpy.loadtxt(ftarget, delimiter='\t', usecols=(1), dtype=int32)  # int32)
 
     print(data.shape)
     print(target.shape)
     # pexit()
 
-    res = chj_data(data, target)
+    res = chj_data(data, target, labels)
     return res
 
 
-def scatter(x, colors):
+def scatter(x, colors, labels):
     # We choose a color palette with seaborn.
     palette = np.array(sns.color_palette("hls", 10))
 
     # We create a scatter plot.
-    f = plt.figure(figsize=(8, 8))
-    ax = plt.subplot(aspect='equal')
+    f = plt.figure(figsize=(12, 6))
+    # 设置背景色
+    ax = plt.subplot(aspect='equal', facecolor='#ececec')
     colorlist = colors.astype(np.int)
-    # print('scatter>{}'.format(palette[colorlist]))
-    sc = ax.scatter(x[:, 0], x[:, 1], lw=0, s=40,
-                    c=palette[colorlist])
-    plt.xlim(-25, 25)
-    plt.ylim(-25, 25)
-    ax.axis('off')
+    sc = ax.scatter(x[:, 0], x[:, 1], lw=0, s=40,c=palette[colorlist])
     ax.axis('tight')
 
     # We add the labels for each digit.
     txts = []
-    # for i in range(10):
-    #     # Position of each label.
-    #     xtext, ytext = np.median(x[colors == i, :], axis=0)
-    #     txt = ax.text(xtext, ytext, str(i), fontsize=24)
-    #     txt.set_path_effects([
-    #         PathEffects.Stroke(linewidth=5, foreground="w"),
-    #         PathEffects.Normal()])
-    #     txts.append(txt)
+    for i in range(2):
+        # Position of each label.
+        xtext, ytext = np.median(x[colors == i, :], axis=0)
+        txt = ax.text(xtext, ytext, str(i), fontsize=24)
+        txt.set_path_effects([
+            PathEffects.Stroke(linewidth=5, foreground="w"),
+            PathEffects.Normal()])
+        txts.append(txt)
+
+    for i in range(x.shape[0]):
+      colors = 'red' if colorlist[i] == 0 else 'black'
+      ax.text(x[i, 0], x[i, 1], str(labels[i]), color=colors, fontdict={'size': 5})
+    # plt.colorbar()
+    plt.savefig('cfe_tsne-generated.png', format='png', transparent=True, dpi=300, pad_inches = 0)
+    # plt.show()
 
     return f, ax, sc, txts
 
+FILENAMES = {
+    'train': '/data/cfe/cfe_mtr100_mte100-train.txt',
+    'valid': '/data/cfe/cfe_mtr100_mte100-valid.txt',
+    'test': '/data/cfe/cfe_mtr100_mte100-test.txt',
+}
+
+def save_json_file(jsonfile, targetArr, lables, sourcepath, colorlist):
+  try:
+    # reset output file
+    if os.path.exists(jsonfile):
+      with open(jsonfile, 'r+', encoding='utf-8') as f:
+          res = f.readlines()
+          print(res)
+          f.seek(0)
+          f.truncate()
+    # format lables property
+    a = {"nodes": [], "edges": []}
+    for i, l in enumerate(targetArr):
+      x = targetArr[i][0]
+      y = targetArr[i][1]
+      source = lables[i]
+      color = "#19be6b" if colorlist[i] == 1 else "#ff9900"
+      size = 4 if colorlist[i] == 1 else 8
+      node = {
+          "color": color,
+          "label": f"{source}",
+          "attributes": {},
+          "y": float(y),
+          "x": float(x),
+          "id": f"{source}",
+          "size": size
+      }
+      a["nodes"].append(node)
+      # a["edges"].append(edge)
+    linesize = 1
+    print(f'ready for write {jsonfile}, data a:{len(a)}')
+    if os.path.exists(sourcepath + FILENAMES['train']):
+      with open(sourcepath + FILENAMES['train'], 'r+', encoding='utf-8') as f:
+          lines = f.readlines()
+          for i, l in enumerate(lines):
+            targets = l.split('\t')
+            # print(f"{i}: {targets[0]} > {targets[2]} ")
+            source = targets[0].strip()
+            target = targets[2].strip()
+            edge = {
+                "sourceID": f"{source}",
+                "attributes": {},
+                "targetID": f"{target}",
+                "size": linesize
+            }
+            a["edges"].append(edge)
+    else:
+      print(f"{sourcepath + FILENAMES['train']} is not exist")
+
+    if os.path.exists(sourcepath + FILENAMES['valid']):
+      with open(sourcepath + FILENAMES['valid'], 'r+', encoding='utf-8') as f:
+          lines = f.readlines()
+          for i, l in enumerate(lines):
+            targets = l.split('\t')
+            # print(f"{i}: {targets[0]} > {targets[2]} ")
+            source = targets[0].strip()
+            target = targets[2].strip()
+            edge = {
+                "sourceID": f"{source}",
+                "attributes": {},
+                "targetID": f"{target}",
+                "size": linesize
+            }
+            a["edges"].append(edge)
+    else:
+      print(f"{sourcepath + FILENAMES['valid']} is not exist")
+
+    if os.path.exists(sourcepath + FILENAMES['test']):
+      with open(sourcepath + FILENAMES['test'], 'r+', encoding='utf-8') as f:
+          lines = f.readlines()
+          for i, l in enumerate(lines):
+            targets = l.split('\t')
+            # print(f"{i}: {targets[0]} > {targets[2]} ")
+            source = targets[0].strip()
+            target = targets[2].strip()
+            edge = {
+                "sourceID": f"{source}",
+                "attributes": {},
+                "targetID": f"{target}",
+                "size": linesize
+            }
+            a["edges"].append(edge)
+    else:
+      print(f"{sourcepath + FILENAMES['test']} is not exist")
+
+    if os.path.exists(sourcepath+jsonfile):
+      with open(sourcepath+jsonfile, 'r+', encoding='utf-8') as f:
+          res = f.readlines()
+          # print(res)
+          f.seek(0)
+          f.truncate()
+
+    with open(sourcepath+jsonfile, "w", encoding='utf-8') as f:
+      # indent 超级好用，格式化保存字典，默认为None，小于0为零个空格
+      f.write(json.dumps(a, indent=4))
+      # json.dump(a,f,indent=4)   # 和上面的效果一样
+  except:
+      print("打开文件异常")
 
 RS = 20150101
-
-
 def run_iris():
   # iris = load_iris() # 使用sklearn自带的测试文件
   # iris = chj_load_file_test(fdata_test, ftarget_test)
   iris = chj_load_file(fdata, ftarget)
-
+  # X = np.vstack([digits.data[digits.target == i]
+  #                for i in range(10)])
+  Y = np.hstack([iris.target[iris.target == i]
+                 for i in range(2)])
+  Y = iris.target
   '''
     n_components:   (default: 2) 嵌入空间的尺寸。
     learning_rate:  (default: 200.0) 
@@ -148,14 +259,17 @@ def run_iris():
   # print("xtslist:{}, {}".format(xtslist, X_tsne.tolist))
   # X_pca = PCA().fit_transform(iris.data)
   print("finishe X_tsne!")
-  plt.figure(figsize=(12, 6))
-  point_numbers = list(range(len(iris.target)))
-  plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c=point_numbers)
-  for i in range(X_tsne.shape[0]):
-    plt.text(X_tsne[i, 0], X_tsne[i, 1], str(iris.target[i]), color='black', fontdict={'size': 5})
-  plt.colorbar()
-  plt.show()
-
+  # plt.figure(figsize=(12, 6))
+  # point_numbers = list(range(len(iris.target)))
+  # plt.scatter(X_tsne[:, 0], X_tsne[:, 1], c=point_numbers)
+  # for i in range(X_tsne.shape[0]):
+  #   plt.text(X_tsne[i, 0], X_tsne[i, 1], str(iris.labels[i]), color='black', fontdict={'size': 5})
+  # plt.colorbar()
+  # plt.savefig('cfe_tsne-generated.png', format='png', transparent=True, dpi=300, pad_inches = 0)
+  # plt.show()
+  scatter(X_tsne, Y, iris.labels)
+  save_json_file('/tools/fixtures/test.json', X_tsne, iris.labels,
+                 examples_folder, Y)
   # X_tsne = TSNE(learning_rate=100).fit_transform(iris.data)
   # X_pca = PCA().fit_transform(iris.data)
   # print("finishe!")
