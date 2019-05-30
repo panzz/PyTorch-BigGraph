@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import argparse
 import json
@@ -16,8 +16,12 @@ from typing import Counter, DefaultDict, Dict, List, Optional, Tuple
 import h5py
 import numpy as np
 
-from torchbiggraph.config import \
-    ConfigSchema, EntitySchema, RelationSchema, get_config_dict_from_module
+from torchbiggraph.config import (
+    ConfigSchema,
+    EntitySchema,
+    RelationSchema,
+    get_config_dict_from_module,
+)
 from torchbiggraph.converters.dictionary import Dictionary
 
 

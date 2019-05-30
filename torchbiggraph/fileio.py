@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import errno
 import io
@@ -21,18 +21,23 @@ import h5py
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+from torch_extensions.rpc.rpc import _deserialize as torch_rpc_deserialize
+from torch_extensions.rpc.rpc import _serialize as torch_rpc_serialize
 from torch_extensions.tensorlist.tensorlist import TensorList
-from torch_extensions.rpc.rpc import (
-    _serialize as torch_rpc_serialize,
-    _deserialize as torch_rpc_deserialize,
-)
 
-from .config import ConfigSchema
-from .entitylist import EntityList
-from .parameter_sharing import ParameterClient
-from .types import EntityName, Partition, Rank, OptimizerStateDict, ModuleStateDict, \
-    FloatTensorType, LongTensorType
-from .util import log, vlog, create_pool
+from torchbiggraph.config import ConfigSchema
+from torchbiggraph.edgelist import EdgeList
+from torchbiggraph.entitylist import EntityList
+from torchbiggraph.parameter_sharing import ParameterClient
+from torchbiggraph.types import (
+    EntityName,
+    FloatTensorType,
+    ModuleStateDict,
+    OptimizerStateDict,
+    Partition,
+    Rank,
+)
+from torchbiggraph.util import create_pool, log, vlog
 
 
 def maybe_old_entity_path(path: str) -> bool:
@@ -77,7 +82,7 @@ class EdgeReader:
         rhs_p: Partition,
         chunk_idx: int = 0,
         num_chunks: int = 1,
-    ) -> Tuple[EntityList, EntityList, LongTensorType]:
+    ) -> EdgeList:
         file_path = os.path.join(self.path, "edges_%d_%d.h5" % (lhs_p, rhs_p))
         assert os.path.exists(file_path), "%s does not exist" % file_path
         with h5py.File(file_path, 'r') as hf:
@@ -109,9 +114,9 @@ class EdgeReader:
             lhsd = self.read_dynamic(hf, 'lhsd', begin, end)
             rhsd = self.read_dynamic(hf, 'rhsd', begin, end)
 
-            return (EntityList(lhs, lhsd),
-                    EntityList(rhs, rhsd),
-                    rel)
+            return EdgeList(EntityList(lhs, lhsd),
+                            EntityList(rhs, rhsd),
+                            rel)
 
     @staticmethod
     def read_dynamic(

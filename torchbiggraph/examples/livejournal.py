@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import argparse
 import os
@@ -12,6 +12,7 @@ import random
 from itertools import chain
 
 import attr
+import pkg_resources
 
 import torchbiggraph.converters.utils as utils
 from torchbiggraph.config import parse_config
@@ -19,13 +20,17 @@ from torchbiggraph.converters.import_from_tsv import convert_input_data
 from torchbiggraph.eval import do_eval
 from torchbiggraph.train import train
 
-
 URL = 'https://snap.stanford.edu/data/soc-LiveJournal1.txt.gz'
 FILENAMES = {
     'train': 'train.txt',
     'test': 'test.txt',
 }
 TRAIN_FRACTION = 0.75
+
+# Figure out the path where the sample config was installed by the package manager.
+# This can be overridden with --config.
+DEFAULT_CONFIG = pkg_resources.resource_filename("torchbiggraph.examples",
+                                                 "configs/livejournal_config.py")
 
 
 def convert_path(fname):
@@ -35,8 +40,19 @@ def convert_path(fname):
 
 
 def random_split_file(fpath):
-    print('Shuffling and splitting train/test file. This may take a while.')
     root = os.path.dirname(fpath)
+
+    output_paths = [
+        os.path.join(root, FILENAMES['train']),
+        os.path.join(root, FILENAMES['test']),
+    ]
+    if all(os.path.exists(path) for path in output_paths):
+        print("Found some files that indicate that the input data "
+              "has already been shuffled and split, not doing it again.")
+        print("These files are: %s" % ", ".join(output_paths))
+        return
+
+    print('Shuffling and splitting train/test file. This may take a while.')
     train_file = os.path.join(root, FILENAMES['train'])
     test_file = os.path.join(root, FILENAMES['test'])
 
@@ -62,8 +78,7 @@ def random_split_file(fpath):
 
 def main():
     parser = argparse.ArgumentParser(description='Example on Livejournal')
-    parser.add_argument('--config',
-                        default='examples/configs/livejournal_config.py',
+    parser.add_argument('--config', default=DEFAULT_CONFIG,
                         help='Path to config file')
     parser.add_argument('-p', '--param', action='append', nargs='*')
     parser.add_argument('--data_dir', default='data',

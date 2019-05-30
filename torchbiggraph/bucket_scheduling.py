@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import random
 from abc import ABC, abstractmethod
@@ -12,11 +12,10 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from torch_extensions.rpc.rpc import Client, Server
 
-from .config import BucketOrder
-from .distributed import Startable
-from .types import Bucket, EntityName, Partition, Rank, Side
-from .util import log, vlog
-
+from torchbiggraph.config import BucketOrder
+from torchbiggraph.distributed import Startable
+from torchbiggraph.types import Bucket, EntityName, Partition, Rank, Side
+from torchbiggraph.util import log, vlog
 
 ###
 ###   Bucket scheduling interface.

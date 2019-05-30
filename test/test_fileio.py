@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import io
 import json
@@ -16,8 +16,8 @@ import h5py
 import numpy as np
 import torch
 
-from torchbiggraph.config import EntitySchema, RelationSchema, ConfigSchema
-from torchbiggraph.fileio import DatasetIO, Mapping, ConfigMetadataProvider
+from torchbiggraph.config import ConfigSchema, EntitySchema, RelationSchema
+from torchbiggraph.fileio import ConfigMetadataProvider, DatasetIO, Mapping
 
 
 class TestDatasetIO(TestCase):

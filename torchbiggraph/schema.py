@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -13,7 +13,6 @@ from itertools import chain
 from typing import Any, ClassVar, Dict, List, Optional, Sized, Type, Union
 
 import attr
-
 
 # This decorator must be applied to all classes that are intended to be used as
 # schemas. It parses the class-level attributes defined as attr.ibs and produces

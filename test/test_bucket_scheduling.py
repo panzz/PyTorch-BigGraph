@@ -4,14 +4,14 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import random
 from itertools import product
 from unittest import TestCase, main
 
-from torchbiggraph.config import BucketOrder
 from torchbiggraph.bucket_scheduling import create_ordered_buckets
+from torchbiggraph.config import BucketOrder
 
 
 class TestCreateOrderedBuckets(TestCase):

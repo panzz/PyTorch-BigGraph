@@ -4,194 +4,166 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import argparse
 import os.path
 import sys
 import time
 from abc import ABC, abstractmethod
-from enum import Enum
+from functools import partial
 from itertools import chain
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 
-import attr
 import torch
 import torch.distributed as td
-import torch.multiprocessing as mp
-from torch.optim import Optimizer, Adagrad
+from torch.optim import Adagrad, Optimizer
 
-from .bucket_scheduling import LockServer, AbstractBucketScheduler, \
-    SingleMachineBucketScheduler, DistributedBucketScheduler
-from .config import parse_config, ConfigSchema
-from .distributed import ProcessRanks, init_process_group, start_server
-from .entitylist import EntityList
-from .eval import eval_many_batches, EvalStats
-from .fileio import CheckpointManager, EdgeReader, MetadataProvider, \
-    ConfigMetadataProvider, maybe_old_entity_path, PartitionClient
-from .model import make_model, override_model, MultiRelationEmbedder
-from .parameter_sharing import ParameterServer, ParameterSharer
-from .row_adagrad import RowAdagrad
-from .stats import Stats, stats
-from .types import Side, Bucket, Partition, EntityName, Rank, ModuleStateDict, \
-    OptimizerStateDict, FloatTensorType, LongTensorType
-from .util import log, vlog, chunk_by_index, get_partitioned_types, \
-    create_pool, fast_approx_rand, DummyOptimizer, split_almost_equally, \
-    round_up_to_nearest_multiple, get_num_workers
-
-
-class Action(Enum):
-    TRAIN = "train"
-    EVAL = "eval"
-
-
-@stats
-class TrainStats(Stats):
-    loss: float = attr.ib()
-    violators_lhs: int = attr.ib()
-    violators_rhs: int = attr.ib()
-
-
-def train_one_batch(
-    model: MultiRelationEmbedder,
-    optimizers: List[Optimizer],
-    batch_lhs: EntityList,
-    batch_rhs: EntityList,
-    # batch_rel is int in normal mode, LongTensor in dynamic relations mode.
-    batch_rel: Union[int, LongTensorType],
-) -> TrainStats:
-    batch_size = batch_lhs.size(0)
-    batch_lhs = batch_lhs.collapse(model.is_featurized(batch_rel, Side.LHS))
-    batch_rhs = batch_rhs.collapse(model.is_featurized(batch_rel, Side.RHS))
-    model.zero_grad()
-
-    loss, (lhs_margin, rhs_margin), _scores = model(batch_lhs,
-                                                    batch_rhs,
-                                                    batch_rel)
-
-    stats = TrainStats(
-        loss=loss.item(),
-        # each row has one column which is the self-interaction, so subtract
-        # this from the number of violators
-        violators_lhs=lhs_margin.gt(0).long().sum().item(),
-        violators_rhs=rhs_margin.gt(0).long().sum().item(),
-        count=batch_size)
-
-    loss.backward()
-    for optimizer in optimizers:
-        optimizer.step(closure=None)
-
-    return stats
-
-
-def train_many_batches(
-    config: ConfigSchema,
-    model: MultiRelationEmbedder,
-    optimizers: List[Optimizer],
-    lhs: EntityList,
-    rhs: EntityList,
-    rel: LongTensorType,
-) -> TrainStats:
-    all_stats = []
-    if model.num_dynamic_rels > 0:
-        # do standard batching
-        offset, num_edges = 0, rel.size(0)
-        while offset < num_edges:
-            batch_size = min(num_edges - offset, config.batch_size)
-            all_stats.append(train_one_batch(
-                model, optimizers,
-                lhs[offset:offset + batch_size],
-                rhs[offset:offset + batch_size],
-                rel[offset:offset + batch_size]))
-            offset += batch_size
-    else:
-        # group the edges by relation, and only do batches of a single
-        # relation type
-        _, lhs_chunked, rhs_chunked = chunk_by_index(rel, lhs, rhs)
-        edge_count_by_relation = torch.tensor([e.nelement() for e in lhs_chunked], dtype=torch.long)
-        offset_by_relation = torch.tensor([0 for e in lhs_chunked], dtype=torch.long)
-
-        while edge_count_by_relation.sum() > 0:
-            # pick which relation to do proportional to number of edges of that type
-            batch_rel = torch.multinomial(edge_count_by_relation.float(), 1).item()
-            batch_size = min(edge_count_by_relation[batch_rel].item(), config.batch_size)
-            offset = offset_by_relation[batch_rel]
-            lhs_rel = lhs_chunked[batch_rel][offset:offset + batch_size]
-            rhs_rel = rhs_chunked[batch_rel][offset:offset + batch_size]
-
-            all_stats.append(train_one_batch(
-                model, optimizers, lhs_rel, rhs_rel, batch_rel))
-
-            edge_count_by_relation[batch_rel] -= batch_size
-            offset_by_relation[batch_rel] += batch_size
-
-    return TrainStats.sum(all_stats)
+from torchbiggraph.batching import (
+    AbstractBatchProcessor,
+    call,
+    process_in_batches,
+)
+from torchbiggraph.bucket_scheduling import (
+    AbstractBucketScheduler,
+    DistributedBucketScheduler,
+    LockServer,
+    SingleMachineBucketScheduler,
+)
+from torchbiggraph.config import (
+    ConfigSchema,
+    LossFunction,
+    RelationSchema,
+    parse_config,
+)
+from torchbiggraph.distributed import (
+    ProcessRanks,
+    init_process_group,
+    start_server,
+)
+from torchbiggraph.edgelist import EdgeList
+from torchbiggraph.eval import RankingEvaluator
+from torchbiggraph.fileio import (
+    CheckpointManager,
+    ConfigMetadataProvider,
+    EdgeReader,
+    MetadataProvider,
+    PartitionClient,
+    maybe_old_entity_path,
+)
+from torchbiggraph.losses import (
+    AbstractLoss,
+    LogisticLoss,
+    RankingLoss,
+    SoftmaxLoss,
+)
+from torchbiggraph.model import (
+    MultiRelationEmbedder,
+    make_model,
+    override_model,
+)
+from torchbiggraph.parameter_sharing import ParameterServer, ParameterSharer
+from torchbiggraph.row_adagrad import RowAdagrad
+from torchbiggraph.stats import Stats
+from torchbiggraph.types import (
+    Bucket,
+    EntityName,
+    FloatTensorType,
+    ModuleStateDict,
+    OptimizerStateDict,
+    Partition,
+    Rank,
+    Side,
+)
+from torchbiggraph.util import (
+    DummyOptimizer,
+    create_pool,
+    fast_approx_rand,
+    get_num_workers,
+    get_partitioned_types,
+    log,
+    round_up_to_nearest_multiple,
+    split_almost_equally,
+    vlog,
+)
 
 
-def perform_action_one_thread(
-    rank: Rank,
-    config: ConfigSchema,
-    action: Action,
-    model: MultiRelationEmbedder,
-    epoch_idx: int,
-    lhs: EntityList,
-    rhs: EntityList,
-    rel: LongTensorType,
-    my_edges: LongTensorType,
-    optimizers: Optional[List[Optimizer]] = None,
-) -> Union[TrainStats, EvalStats]:
-    """ This is the main loop executed by each HOGWILD worker thread.
-    """
-    lhs = lhs[my_edges]
-    rhs = rhs[my_edges]
-    rel = rel[my_edges]
+class Trainer(AbstractBatchProcessor):
 
-    if action is Action.TRAIN:
-        if optimizers is None:
-            raise ValueError("Need optimizers for training")
-        if rank > 0 and epoch_idx == 0:
-            time.sleep(config.hogwild_delay)
-        stats = train_many_batches(config, model, optimizers, lhs, rhs, rel)
-    elif action is Action.EVAL:
-        eval_batch_size = round_up_to_nearest_multiple(
-            config.batch_size, config.eval_num_batch_negs
-        )
-        eval_config = attr.evolve(config, batch_size=eval_batch_size)
+    loss_fn: AbstractLoss
 
+    def __init__(
+        self,
+        global_optimizer: Optimizer,
+        loss_fn: LossFunction,
+        margin: float,
+        relations: List[RelationSchema],
+    ) -> None:
+        super().__init__()
+        self.global_optimizer = global_optimizer
+        self.entity_optimizers: Dict[Tuple[EntityName, Partition], Optimizer] = {}
+
+        if loss_fn is LossFunction.LOGISTIC:
+            self.loss_fn = LogisticLoss()
+        elif loss_fn is LossFunction.RANKING:
+            self.loss_fn = RankingLoss(margin)
+        elif loss_fn is LossFunction.SOFTMAX:
+            self.loss_fn = SoftmaxLoss()
+        else:
+            raise NotImplementedError("Unknown loss function: %s" % loss_fn)
+
+        self.relations = relations
+
+    def process_one_batch(
+        self,
+        model: MultiRelationEmbedder,
+        batch_edges: EdgeList,
+    ) -> Stats:
+        model.zero_grad()
+
+        scores = model(batch_edges)
+
+        lhs_loss = self.loss_fn(scores.lhs_pos, scores.lhs_neg)
+        rhs_loss = self.loss_fn(scores.rhs_pos, scores.rhs_neg)
+        relation = self.relations[batch_edges.get_relation_type_as_scalar()
+                                  if batch_edges.has_scalar_relation_type()
+                                  else 0]
+        loss = relation.weight * (lhs_loss + rhs_loss)
+
+        stats = Stats(
+            loss=float(loss),
+            violators_lhs=int((scores.lhs_neg > scores.lhs_pos.unsqueeze(1)).sum()),
+            violators_rhs=int((scores.rhs_neg > scores.rhs_pos.unsqueeze(1)).sum()),
+            count=len(batch_edges))
+
+        loss.backward()
+        self.global_optimizer.step(closure=None)
+        for optimizer in self.entity_optimizers.values():
+            optimizer.step(closure=None)
+
+        return stats
+
+
+class TrainingRankingEvaluator(RankingEvaluator):
+
+    def __init__(
+        self,
+        override_num_batch_negs: int,
+        override_num_uniform_negs: int,
+    ) -> None:
+        super().__init__()
+        self.override_num_batch_negs = override_num_batch_negs
+        self.override_num_uniform_negs = override_num_uniform_negs
+
+    def process_one_batch(
+        self,
+        model: MultiRelationEmbedder,
+        batch_edges: EdgeList,
+    ) -> Stats:
         with override_model(model,
-                            num_uniform_negs=config.eval_num_uniform_negs,
-                            num_batch_negs=config.eval_num_batch_negs):
-            stats = eval_many_batches(eval_config, model, lhs, rhs, rel)
-    else:
-        raise NotImplementedError("Unknown action: %s" % action)
-    assert stats.count == my_edges.size(0)
-    return stats
-
-
-def distribute_action_among_workers(
-    pool: mp.Pool,
-    num_workers: int,
-    config: ConfigSchema,
-    action: Action,
-    model: MultiRelationEmbedder,
-    epoch_idx: int,
-    lhs: EntityList,
-    rhs: EntityList,
-    rel: LongTensorType,
-    edge_perm: LongTensorType,
-    optimizers: Optional[List[Optimizer]] = None
-) -> Union[TrainStats, EvalStats]:
-    all_stats = pool.starmap(perform_action_one_thread, [
-        (Rank(i), config, action, model, epoch_idx, lhs, rhs, rel, edge_perm[s], optimizers)
-        for i, s in enumerate(split_almost_equally(edge_perm.size(0), num_parts=num_workers))
-    ])
-
-    if action is action.TRAIN:
-        return TrainStats.sum(all_stats).average()
-    elif action is action.EVAL:
-        return EvalStats.sum(all_stats).average()
-    else:
-        raise NotImplementedError("Unknown action: %s" % action)
+                            num_batch_negs=self.override_num_batch_negs,
+                            num_uniform_negs=self.override_num_uniform_negs):
+            return super().process_one_batch(model, batch_edges)
 
 
 def init_embs(
@@ -286,8 +258,11 @@ class IterationManager(MetadataProvider):
 
 def train_and_report_stats(
     config: ConfigSchema,
+    model: Optional[MultiRelationEmbedder] = None,
+    trainer: Optional[AbstractBatchProcessor] = None,
+    evaluator: Optional[AbstractBatchProcessor] = None,
     rank: Rank = RANK_ZERO,
-) -> Generator[Tuple[int, Optional[EvalStats], TrainStats, Optional[EvalStats]], None, None]:
+) -> Generator[Tuple[int, Optional[Stats], Stats, Optional[Stats]], None, None]:
     """Each epoch/pass, for each partition pair, loads in embeddings and edgelist
     from disk, runs HOGWILD training on them, and writes partitions back to disk.
     """
@@ -468,14 +443,22 @@ def train_and_report_stats(
 
     log("Initializing global model...")
 
-    model = make_model(config)
-
-    vlog("Initializing optimizers")
-    # FIXME: use SGD with different learning rate?
-    optimizers: Dict[Optional[Tuple[EntityName, Partition]], Optimizer] = {
-        # The "None" optimizer is for the non-entity-specific parameters.
-        None: make_optimizer(model.parameters(), False)
-    }
+    if model is None:
+        model = make_model(config)
+    model.share_memory()
+    if trainer is None:
+        trainer = Trainer(
+            global_optimizer=make_optimizer(model.parameters(), False),
+            loss_fn=config.loss_fn,
+            margin=config.margin,
+            relations=config.relations,
+        )
+    if evaluator is None:
+        evaluator = TrainingRankingEvaluator(
+            override_num_batch_negs=config.eval_num_batch_negs,
+            override_num_uniform_negs=config.eval_num_uniform_negs,
+        )
+    eval_batch_size = round_up_to_nearest_multiple(config.batch_size, config.eval_num_batch_negs)
 
     state_dict, optim_state = checkpoint_manager.maybe_read_model()
 
@@ -484,7 +467,7 @@ def train_and_report_stats(
     if state_dict is not None:
         model.load_state_dict(state_dict, strict=False)
     if optim_state is not None:
-        optimizers[None].load_state_dict(optim_state)
+        trainer.global_optimizer.load_state_dict(optim_state)
 
     vlog("Loading unpartitioned entities...")
     for entity, econfig in config.entities.items():
@@ -495,7 +478,7 @@ def train_and_report_stats(
             optimizer = make_optimizer([embs], True)
             if optim_state is not None:
                 optimizer.load_state_dict(optim_state)
-            optimizers[(entity, Partition(0))] = optimizer
+            trainer.entity_optimizers[(entity, Partition(0))] = optimizer
 
     # start communicating shared parameters with the parameter server
     if parameter_sharer is not None:
@@ -533,11 +516,11 @@ def train_and_report_stats(
                      (entity, part, side.pick("lhs", "rhs")))
                 embs = model.get_embeddings(entity, side)
                 optim_key = (entity, part)
-                optim_state = OptimizerStateDict(optimizers[optim_key].state_dict())
-                io_bytes += embs.nelement() * 4  # ignore optim state
+                optim_state = OptimizerStateDict(trainer.entity_optimizers[optim_key].state_dict())
+                io_bytes += embs.numel() * embs.element_size()  # ignore optim state
                 checkpoint_manager.write(entity, part, embs.detach(), optim_state)
-                if optim_key in optimizers:
-                    del optimizers[optim_key]
+                if optim_key in trainer.entity_optimizers:
+                    del trainer.entity_optimizers[optim_key]
                 # these variables are holding large objects; let them be freed
                 del embs
                 del optim_state
@@ -572,20 +555,20 @@ def train_and_report_stats(
                 force_dirty = bucket_scheduler.check_and_set_dirty(entity, part)
                 embs, optim_state = load_embeddings(
                     entity, part, strict=strict, force_dirty=force_dirty)
-                io_bytes += embs.nelement() * 4  # ignore optim state
+                io_bytes += embs.numel() * embs.element_size()  # ignore optim state
 
             model.set_embeddings(entity, embs, side)
             tmp_emb[part_key] = embs
 
             optim_key = (entity, part)
-            if optim_key not in optimizers:
+            if optim_key not in trainer.entity_optimizers:
                 vlog("Resetting optimizer %s" % (optim_key,))
                 optimizer = make_optimizer([embs], True)
                 if optim_state is not None:
                     vlog("Setting optim state")
                     optimizer.load_state_dict(optim_state)
 
-                optimizers[optim_key] = optimizer
+                trainer.entity_optimizers[optim_key] = optimizer
 
         return io_bytes
 
@@ -647,11 +630,13 @@ def train_and_report_stats(
                 checkpoint_manager.record_marker(current_index)
 
             log_status("Loading edges")
-            lhs, rhs, rel = edge_reader.read(
+            edges = edge_reader.read(
                 cur_b.lhs, cur_b.rhs, edge_chunk_idx, config.num_edge_chunks)
-            num_edges = rel.size(0)
-            # this might be off in the case of tensorlist
-            io_bytes += (lhs.nelement() + rhs.nelement() + rel.nelement()) * 4
+            num_edges = len(edges)
+            # this might be off in the case of tensorlist or extra edge fields
+            io_bytes += edges.lhs.tensor.numel() * edges.lhs.tensor.element_size()
+            io_bytes += edges.rhs.tensor.numel() * edges.rhs.tensor.element_size()
+            io_bytes += edges.rel.numel() * edges.rel.element_size()
 
             log_status("Shuffling edges")
             # Fix a seed to get the same permutation every time; have it
@@ -669,40 +654,71 @@ def train_and_report_stats(
                 edge_perm = torch.randperm(num_edges)
 
             # HOGWILD evaluation before training
-            eval_stats_before: Optional[EvalStats] = None
+            eval_stats_before: Optional[Stats] = None
             if num_eval_edges > 0:
                 log_status("Waiting for workers to perform evaluation")
-                eval_stats_before = distribute_action_among_workers(
-                    pool, num_workers, config,
-                    Action.EVAL, model, epoch_idx, lhs, rhs, rel, eval_edge_perm)
+                all_eval_stats_before = pool.map(call, [
+                    partial(
+                        process_in_batches,
+                        batch_size=eval_batch_size,
+                        model=model,
+                        batch_processor=evaluator,
+                        edges=edges,
+                        indices=eval_edge_perm[s],
+                    )
+                    for s in split_almost_equally(eval_edge_perm.size(0),
+                                                  num_parts=num_workers)
+                ])
+                eval_stats_before = Stats.sum(all_eval_stats_before).average()
                 log("stats before %s: %s" % (cur_b, eval_stats_before))
 
             io_time += time.time() - tic
             tic = time.time()
             # HOGWILD training
             log_status("Waiting for workers to perform training")
-            stats = distribute_action_among_workers(
-                pool, num_workers, config,
-                Action.TRAIN, model, epoch_idx, lhs, rhs, rel, edge_perm,
-                list(optimizers.values()))
+            # FIXME should we only delay if iteration_idx == 0?
+            all_stats = pool.map(call, [
+                partial(
+                    process_in_batches,
+                    batch_size=config.batch_size,
+                    model=model,
+                    batch_processor=trainer,
+                    edges=edges,
+                    indices=edge_perm[s],
+                    delay=config.hogwild_delay if epoch_idx == 0 and rank > 0 else 0,
+                )
+                for rank, s in enumerate(split_almost_equally(edge_perm.size(0),
+                                                              num_parts=num_workers))
+            ])
+            stats = Stats.sum(all_stats).average()
             compute_time = time.time() - tic
 
             log_status(
                 "bucket %d / %d : Processed %d edges in %.2f s "
                 "( %.2g M/sec ); io: %.2f s ( %.2f MB/sec )" %
                 (total_buckets - remaining, total_buckets,
-                 lhs.size(0), compute_time, lhs.size(0) / compute_time / 1e6,
+                 num_edges, compute_time, num_edges / compute_time / 1e6,
                  io_time, io_bytes / io_time / 1e6),
                 always=True)
             log_status("%s" % stats, always=True)
 
             # HOGWILD eval after training
-            eval_stats_after: Optional[EvalStats] = None
+            eval_stats_after: Optional[Stats] = None
             if num_eval_edges > 0:
                 log_status("Waiting for workers to perform evaluation")
-                eval_stats_after = distribute_action_among_workers(
-                    pool, num_workers, config,
-                    Action.EVAL, model, epoch_idx, lhs, rhs, rel, eval_edge_perm)
+                all_eval_stats_after = pool.map(call, [
+                    partial(
+                        process_in_batches,
+                        batch_size=eval_batch_size,
+                        model=model,
+                        batch_processor=evaluator,
+                        edges=edges,
+                        indices=eval_edge_perm[s],
+                    )
+                    for s in split_almost_equally(eval_edge_perm.size(0),
+                                                  num_parts=num_workers)
+                ])
+                eval_stats_after = Stats.sum(all_eval_stats_after).average()
                 log("stats after %s: %s" % (cur_b, eval_stats_after))
 
             # Add train/eval metrics to queue
@@ -721,7 +737,7 @@ def train_and_report_stats(
             for entity, econfig in config.entities.items():
                 if econfig.num_partitions == 1:
                     embs = model.get_embeddings(entity, Side.LHS)
-                    optimizer = optimizers[(entity, Partition(0))]
+                    optimizer = trainer.entity_optimizers[(entity, Partition(0))]
 
                     checkpoint_manager.write(
                         entity, Partition(0),
@@ -737,7 +753,7 @@ def train_and_report_stats(
             log("Writing metadata...")
             checkpoint_manager.write_model(
                 sanitized_state_dict,
-                OptimizerStateDict(optimizers[None].state_dict()),
+                OptimizerStateDict(trainer.global_optimizer.state_dict()),
             )
 
         log("Writing the checkpoint...")
@@ -779,10 +795,13 @@ def train_and_report_stats(
 
 def train(
     config: ConfigSchema,
+    model: Optional[MultiRelationEmbedder] = None,
+    trainer: Optional[AbstractBatchProcessor] = None,
+    evaluator: Optional[AbstractBatchProcessor] = None,
     rank: Rank = RANK_ZERO,
 ) -> None:
     # Create and run the generator until exhaustion.
-    for _ in train_and_report_stats(config, rank):
+    for _ in train_and_report_stats(config, model, trainer, evaluator, rank):
         pass
 
 

@@ -4,24 +4,40 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import os.path
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from enum import Enum
-from typing import Dict, List, Optional, Sequence, Tuple, Type, Union
+from typing import (
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+)
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_extensions.tensorlist.tensorlist import TensorList
 
-from .config import LossFunction, Operator, Comparator, EntitySchema, \
-    RelationSchema, ConfigSchema
-from .fileio import maybe_old_entity_path
-from .types import Side, FloatTensorType, LongTensorType
-from .util import log
+from torchbiggraph.config import (
+    Comparator,
+    ConfigSchema,
+    EntitySchema,
+    Operator,
+    RelationSchema,
+)
+from torchbiggraph.edgelist import EdgeList
+from torchbiggraph.entitylist import EntityList
+from torchbiggraph.fileio import maybe_old_entity_path
+from torchbiggraph.types import FloatTensorType, LongTensorType, Side
+from torchbiggraph.util import log
 
 
 def match_shape(tensor, *expected_shape):
@@ -97,6 +113,10 @@ def match_shape(tensor, *expected_shape):
 class AbstractEmbedding(nn.Module, ABC):
 
     @abstractmethod
+    def forward(self, input_: EntityList) -> FloatTensorType:
+        pass
+
+    @abstractmethod
     def get_all_entities(self) -> FloatTensorType:
         pass
 
@@ -112,16 +132,19 @@ class SimpleEmbedding(AbstractEmbedding):
         self.weight: nn.Parameter = weight
         self.max_norm: Optional[float] = max_norm
 
-    def forward(self, input: LongTensorType) -> FloatTensorType:
+    def forward(self, input_: EntityList) -> FloatTensorType:
+        return self.get(input_.to_tensor())
+
+    def get(self, input_: LongTensorType) -> FloatTensorType:
         return F.embedding(
-            input, self.weight, max_norm=self.max_norm, sparse=True,
+            input_, self.weight, max_norm=self.max_norm, sparse=True,
         )
 
     def get_all_entities(self) -> FloatTensorType:
-        return self(torch.arange(self.weight.size(0), dtype=torch.long))
+        return self.get(torch.arange(self.weight.size(0), dtype=torch.long))
 
     def sample_entities(self, *dims: int) -> FloatTensorType:
-        return self(torch.randint(low=0, high=self.weight.size(0), size=dims))
+        return self.get(torch.randint(low=0, high=self.weight.size(0), size=dims))
 
 
 class FeaturizedEmbedding(AbstractEmbedding):
@@ -131,11 +154,14 @@ class FeaturizedEmbedding(AbstractEmbedding):
         self.weight: nn.Parameter = weight
         self.max_norm: Optional[float] = max_norm
 
-    def forward(self, input: TensorList) -> FloatTensorType:
-        if input.size(0) == 0:
+    def forward(self, input_: EntityList) -> FloatTensorType:
+        return self.get(input_.to_tensor_list())
+
+    def get(self, input_: TensorList) -> FloatTensorType:
+        if input_.size(0) == 0:
             return torch.empty((0, self.weight.size(1)))
         return F.embedding_bag(
-            input.data.long(), self.weight, input.offsets[:-1],
+            input_.data.long(), self.weight, input_.offsets[:-1],
             max_norm=self.max_norm, sparse=True,
         )
 
@@ -429,7 +455,7 @@ def instantiate_operator(
     side: Side,
     num_dynamic_rels: int,
     dim: int,
-) -> Union[AbstractOperator, AbstractDynamicOperator]:
+) -> Optional[Union[AbstractOperator, AbstractDynamicOperator]]:
     if num_dynamic_rels > 0:
         try:
             dynamic_operator_class = DYNAMIC_OPERATORS[operator]
@@ -438,7 +464,7 @@ def instantiate_operator(
                 "Unknown operator for dynamic rels: %s" % operator)
         return dynamic_operator_class(dim, num_dynamic_rels)
     elif side is Side.LHS:
-        return IdentityOperator(dim)
+        return None
     else:
         try:
             operator_class = OPERATORS[operator]
@@ -606,112 +632,8 @@ class BiasedComparator(AbstractComparator):
         return pos_scores, lhs_neg_scores, rhs_neg_scores
 
 
-class AbstractLoss(nn.Module, ABC):
-
-    """Calculate weighted loss of scores for positive and negative pairs.
-
-    The inputs are a 1-D tensor of size P containing scores for positive pairs
-    of entities (i.e., those among which an edge exists) and a P x N tensor
-    containing scores for negative pairs (i.e., where no edge should exist). The
-    pairs of entities corresponding to pos_scores[i] and to neg_scores[i,j] have
-    at least one endpoint in common. The output is the loss value these scores
-    induce and the margin for each negative score, which is zero if the negative
-    score is smaller than the positive one by exactly the minimum expected
-    amount, larger than zero if it's closer to the positive and smaller than
-    zero if it's farther away. The margin will be returned only for the ranking
-    loss, and will be zero for all other functions. If the method supports
-    weighting (as is the case for the logistic loss) all positive scores will be
-    weighted by the same weight and so will all the negative ones.
-
-    """
-
-    @abstractmethod
-    def forward(
-        self,
-        pos_scores: FloatTensorType,
-        neg_scores: FloatTensorType,
-    ) -> Tuple[FloatTensorType, FloatTensorType]:
-        pass
-
-
-class LogisticLoss(AbstractLoss):
-
-    def forward(
-        self,
-        pos_scores: FloatTensorType,
-        neg_scores: FloatTensorType,
-    ) -> Tuple[FloatTensorType, FloatTensorType]:
-        num_pos = match_shape(pos_scores, -1)
-        num_neg = match_shape(neg_scores, num_pos, -1)
-        neg_weight = 1 / num_neg if num_neg > 0 else 0
-
-        pos_loss = F.binary_cross_entropy_with_logits(
-            pos_scores,
-            torch.ones(()).expand(num_pos),
-            reduction='sum',
-        )
-        neg_loss = F.binary_cross_entropy_with_logits(
-            neg_scores,
-            torch.zeros(()).expand(num_pos, num_neg),
-            reduction='sum',
-        )
-
-        loss = pos_loss + neg_weight * neg_loss
-        margin = torch.zeros(()).expand(num_pos, num_neg)
-
-        return loss, margin
-
-
-class RankingLoss(AbstractLoss):
-
-    def __init__(self, margin):
-        super().__init__()
-        self.margin = margin
-
-    def forward(
-        self,
-        pos_scores: FloatTensorType,
-        neg_scores: FloatTensorType,
-    ) -> Tuple[FloatTensorType, FloatTensorType]:
-        num_pos = match_shape(pos_scores, -1)
-        num_neg = match_shape(neg_scores, num_pos, -1)
-
-        # FIXME Workaround for https://github.com/pytorch/pytorch/issues/15223.
-        if num_pos == 0 or num_neg == 0:
-            return (torch.zeros((), requires_grad=True),
-                    torch.empty((num_pos, num_neg)))
-
-        margin = neg_scores - pos_scores.unsqueeze(1) + self.margin
-        loss = margin.clamp(min=0).sum()
-
-        return loss, margin
-
-
-class SoftmaxLoss(AbstractLoss):
-
-    def forward(
-        self,
-        pos_scores: FloatTensorType,
-        neg_scores: FloatTensorType,
-    ) -> Tuple[FloatTensorType, FloatTensorType]:
-        num_pos = match_shape(pos_scores, -1)
-        num_neg = match_shape(neg_scores, num_pos, -1)
-
-        # FIXME Workaround for https://github.com/pytorch/pytorch/issues/15870
-        # and https://github.com/pytorch/pytorch/issues/15223.
-        if num_pos == 0 or num_neg == 0:
-            return (torch.zeros((), requires_grad=True),
-                    torch.empty((num_pos, num_neg)))
-
-        scores = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1)
-        loss = F.cross_entropy(
-            scores,
-            torch.zeros((), dtype=torch.long).expand(num_pos),
-            reduction='sum',
-        )
-        margin = torch.zeros(()).expand(num_pos, num_neg)
-
-        return loss, margin
+def ceil_of_ratio(num: int, den: int) -> int:
+    return (num - 1) // den + 1
 
 
 class Negatives(Enum):
@@ -723,11 +645,12 @@ class Negatives(Enum):
 
 Mask = List[Tuple[Union[int, slice, Sequence[int], LongTensorType], ...]]
 
-# lhs_margin, rhs_margin
-Margins = Tuple[FloatTensorType, FloatTensorType]
 
-# lhs_pos, rhs_pos, lhs_neg, rhs_neg
-Scores = Tuple[FloatTensorType, FloatTensorType, FloatTensorType, FloatTensorType]
+class Scores(NamedTuple):
+    lhs_pos: FloatTensorType
+    rhs_pos: FloatTensorType
+    lhs_neg: FloatTensorType
+    rhs_neg: FloatTensorType
 
 
 class MultiRelationEmbedder(nn.Module):
@@ -758,15 +681,13 @@ class MultiRelationEmbedder(nn.Module):
         entities: Dict[str, EntitySchema],
         num_batch_negs: int,
         num_uniform_negs: int,
-        margin: float = 0.1,
-        comparator: Comparator = Comparator.COS,
+        lhs_operators: Sequence[Optional[Union[AbstractOperator, AbstractDynamicOperator]]],
+        rhs_operators: Sequence[Optional[Union[AbstractOperator, AbstractDynamicOperator]]],
+        comparator: AbstractComparator,
         global_emb: bool = False,
         max_norm: Optional[float] = None,
-        loss_fn: LossFunction = LossFunction.RANKING,
-        bias: bool = False,
         num_dynamic_rels: int = 0,
     ):
-
         super().__init__()
 
         self.dim: int = dim
@@ -776,38 +697,14 @@ class MultiRelationEmbedder(nn.Module):
         self.num_dynamic_rels: int = num_dynamic_rels
         if num_dynamic_rels > 0:
             assert len(relations) == 1
-        self.lhs_operators: nn.ModuleList = nn.ModuleList()
-        self.rhs_operators: nn.ModuleList = nn.ModuleList()
-        for r in relations:
-            self.lhs_operators.append(
-                instantiate_operator(r.operator, Side.LHS, num_dynamic_rels, dim))
-            self.rhs_operators.append(
-                instantiate_operator(r.operator, Side.RHS, num_dynamic_rels, dim))
+
+        self.lhs_operators: nn.ModuleList = nn.ModuleList(lhs_operators)
+        self.rhs_operators: nn.ModuleList = nn.ModuleList(rhs_operators)
 
         self.num_batch_negs: int = num_batch_negs
         self.num_uniform_negs: int = num_uniform_negs
 
-        if comparator is Comparator.DOT:
-            self.comparator = DotComparator()
-        elif comparator is Comparator.COS:
-            self.comparator = CosComparator()
-        else:
-            raise NotImplementedError("Unknown comparator: %s" % comparator)
-
-        if bias:
-            self.comparator = BiasedComparator(self.comparator)
-
-        if loss_fn is LossFunction.LOGISTIC:
-            self.loss_fn = LogisticLoss()
-        elif loss_fn is LossFunction.RANKING:
-            self.loss_fn = RankingLoss(margin)
-        elif loss_fn is LossFunction.SOFTMAX:
-            self.loss_fn = SoftmaxLoss()
-        else:
-            raise NotImplementedError("Unknown loss function: %s" % loss_fn)
-
-        if loss_fn is LossFunction.LOGISTIC and comparator is Comparator.COS:
-            log("WARNING: You have logistic loss and cosine distance. Are you sure?")
+        self.comparator = comparator
 
         self.lhs_embs: nn.ParameterDict = nn.ModuleDict()
         self.rhs_embs: nn.ParameterDict = nn.ModuleDict()
@@ -848,47 +745,39 @@ class MultiRelationEmbedder(nn.Module):
     def adjust_embs(
         self,
         embs: FloatTensorType,
-        rel: Union[int, Optional[LongTensorType]],
-        side: Side,
+        rel: Union[int, LongTensorType],
+        entity_type: str,
+        operator: Union[None, AbstractOperator, AbstractDynamicOperator],
     ) -> FloatTensorType:
 
         # 1. Apply the global embedding, if enabled
         if self.global_embs is not None:
             if not isinstance(rel, int):
                 raise RuntimeError("Cannot have global embs with dynamic rels")
-            relation = self.relations[rel]
-            entity = side.pick(relation.lhs, relation.rhs)
-            embs += self.global_embs[self.EMB_PREFIX + entity]
+            embs += self.global_embs[self.EMB_PREFIX + entity_type]
 
         # 2. Apply the relation operator
-        if self.num_dynamic_rels > 0:
-            if rel is not None:
-                embs = side.pick(self.lhs_operators, self.rhs_operators)[0](embs, rel)
-        else:
-            embs = side.pick(self.lhs_operators, self.rhs_operators)[rel](embs)
+        if operator is not None:
+            if self.num_dynamic_rels > 0:
+                embs = operator(embs, rel)
+            else:
+                embs = operator(embs)
 
         # 3. Prepare for the comparator.
         embs = self.comparator.prepare(embs)
 
         return embs
 
-    def is_featurized(self, rel, side: Side):
-        if self.num_dynamic_rels > 0:
-            rel = 0
-        rel_config = self.relations[rel]
-        ent = side.pick(rel_config.lhs, rel_config.rhs)
-        return self.entities[ent].featurized
-
     def prepare_negatives(
         self,
-        pos_input: Union[LongTensorType, TensorList],
+        pos_input: EntityList,
         pos_embs: FloatTensorType,
         module: AbstractEmbedding,
         type_: Negatives,
         num_uniform_neg: int,
-        *,
-        rel: Union[int, Optional[LongTensorType]],
-        side: Side,
+        rel: Union[int, LongTensorType],
+        entity_type: str,
+        operator: Union[None, AbstractOperator, AbstractDynamicOperator],
     ) -> Tuple[FloatTensorType, Mask]:
         """Given some chunked positives, set up chunks of negatives.
 
@@ -907,7 +796,7 @@ class MultiRelationEmbedder(nn.Module):
         scores that must be ignored.
 
         """
-        num_pos = match_shape(pos_input, -1)
+        num_pos = len(pos_input)
         num_chunks, chunk_size, dim = match_shape(pos_embs, -1, -1, -1)
         last_chunk_size = num_pos - (num_chunks - 1) * chunk_size
 
@@ -928,7 +817,10 @@ class MultiRelationEmbedder(nn.Module):
                 else:
                     neg_embs = torch.cat([
                         pos_embs,
-                        self.adjust_embs(uniform_neg_embs, rel=rel, side=side)
+                        self.adjust_embs(
+                            uniform_neg_embs,
+                            rel, entity_type, operator,
+                        )
                     ], dim=1)
 
             chunk_indices = torch.arange(chunk_size, dtype=torch.long)
@@ -946,12 +838,10 @@ class MultiRelationEmbedder(nn.Module):
                 (-1, slice(last_chunk_size), slice(last_chunk_size, chunk_size)))
 
         elif type_ is Negatives.ALL:
-            if not isinstance(pos_input, torch.LongTensor):
-                raise TypeError("Cannot use all entities as negatives "
-                                "without the IDs of the positive entities")
+            pos_input = pos_input.to_tensor()
             neg_embs = self.adjust_embs(
                 module.get_all_entities().expand(num_chunks, -1, dim),
-                rel=rel, side=side,
+                rel, entity_type, operator,
             )
 
             if num_uniform_neg > 0:
@@ -980,12 +870,9 @@ class MultiRelationEmbedder(nn.Module):
 
     def forward(
         self,
-        lhs: Union[LongTensorType, TensorList],
-        rhs: Union[LongTensorType, TensorList],
-        rel: Union[int, LongTensorType],
-    ) -> Tuple[FloatTensorType, Margins, Scores]:
-        num_pos = match_shape(lhs, -1)
-        match_shape(rhs, num_pos)
+        edges: EdgeList,
+    ) -> Scores:
+        num_pos = len(edges)
 
         chunk_size: int
         lhs_negatives: Negatives
@@ -994,20 +881,29 @@ class MultiRelationEmbedder(nn.Module):
         rhs_num_uniform_negs: int
 
         if self.num_dynamic_rels > 0:
-            if not isinstance(rel, torch.LongTensor):
+            if edges.has_scalar_relation_type():
                 raise TypeError("Need relation for each positive pair")
-            match_shape(rel, num_pos)
             relation_idx = 0
         else:
-            if not isinstance(rel, int):
+            if not edges.has_scalar_relation_type():
                 raise TypeError("All positive pairs must come from the same relation")
-            relation_idx = rel
+            relation_idx = edges.get_relation_type_as_scalar()
 
         relation = self.relations[relation_idx]
-        lhs_module = self.lhs_embs[self.EMB_PREFIX + relation.lhs]
-        rhs_module = self.rhs_embs[self.EMB_PREFIX + relation.rhs]
-        lhs_pos = lhs_module(lhs)
-        rhs_pos = rhs_module(rhs)
+        lhs_module: AbstractEmbedding = self.lhs_embs[self.EMB_PREFIX + relation.lhs]
+        rhs_module: AbstractEmbedding = self.rhs_embs[self.EMB_PREFIX + relation.rhs]
+        lhs_pos: FloatTensorType = lhs_module(edges.lhs)
+        rhs_pos: FloatTensorType = rhs_module(edges.rhs)
+
+        if relation.all_negs:
+            chunk_size = num_pos
+            negative_sampling_method = Negatives.ALL
+        elif self.num_batch_negs == 0:
+            chunk_size = self.num_uniform_negs
+            negative_sampling_method = Negatives.UNIFORM
+        else:
+            chunk_size = self.num_batch_negs
+            negative_sampling_method = Negatives.BATCH_UNIFORM
 
         if self.num_dynamic_rels == 0:
             # In this case the operator is only applied to the RHS. This means
@@ -1016,8 +912,29 @@ class MultiRelationEmbedder(nn.Module):
             # m(u', f_r(v)) and m(u, f_r(v')). Since r is always the same, each
             # positive and negative right-hand side entity is only passed once
             # through the operator.
-            lhs_pos = self.adjust_embs(lhs_pos, rel=rel, side=Side.LHS)
-            rhs_pos = self.adjust_embs(rhs_pos, rel=rel, side=Side.RHS)
+
+            if self.lhs_operators[relation_idx] is not None:
+                raise RuntimeError("In non-dynamic relation mode there should "
+                                   "be only a right-hand side operator")
+
+            # Apply operator to right-hand side, sample negatives on both sides.
+            pos_scores, lhs_neg_scores, rhs_neg_scores = self.forward_direction_agnostic(
+                edges.lhs,
+                edges.rhs,
+                edges.get_relation_type(),
+                relation.lhs,
+                relation.rhs,
+                None,
+                self.rhs_operators[relation_idx],
+                lhs_module,
+                rhs_module,
+                lhs_pos,
+                rhs_pos,
+                chunk_size,
+                negative_sampling_method,
+                negative_sampling_method,
+            )
+            lhs_pos_scores = rhs_pos_scores = pos_scores
 
         else:
             # In this case the positive edges may come from different relations.
@@ -1034,81 +951,101 @@ class MultiRelationEmbedder(nn.Module):
             # (u', r, v) and (u, r, v') are scored respectively as m(u', h_r(v))
             # and m(g_r(u), v'). This way we only need to perform two operator
             # applications for every positive input edge, one for each side.
-            lhs_r_pos = self.adjust_embs(lhs_pos, rel=rel, side=Side.LHS)
-            rhs_r_pos = self.adjust_embs(rhs_pos, rel=rel, side=Side.RHS)
-            lhs_pos = self.adjust_embs(lhs_pos, rel=None, side=Side.LHS)
-            rhs_pos = self.adjust_embs(rhs_pos, rel=None, side=Side.RHS)
 
-        if relation.all_negs:
-            chunk_size = num_pos
-            negative_sampling_method = Negatives.ALL
-        elif self.num_batch_negs == 0:
-            chunk_size = self.num_uniform_negs
-            negative_sampling_method = Negatives.UNIFORM
-        else:
-            chunk_size = self.num_batch_negs
-            negative_sampling_method = Negatives.BATCH_UNIFORM
+            # "Forward" edges: apply operator to rhs, sample negatives on lhs.
+            lhs_pos_scores, lhs_neg_scores, _ = self.forward_direction_agnostic(
+                edges.lhs,
+                edges.rhs,
+                edges.get_relation_type(),
+                relation.lhs,
+                relation.rhs,
+                None,
+                self.rhs_operators[relation_idx],
+                lhs_module,
+                rhs_module,
+                lhs_pos,
+                rhs_pos,
+                chunk_size,
+                negative_sampling_method,
+                Negatives.NONE,
+            )
+            # "Reverse" edges: apply operator to lhs, sample negatives on rhs.
+            rhs_pos_scores, rhs_neg_scores, _ = self.forward_direction_agnostic(
+                edges.rhs,
+                edges.lhs,
+                edges.get_relation_type(),
+                relation.rhs,
+                relation.lhs,
+                None,
+                self.lhs_operators[relation_idx],
+                rhs_module,
+                lhs_module,
+                rhs_pos,
+                lhs_pos,
+                chunk_size,
+                negative_sampling_method,
+                Negatives.NONE,
+            )
 
-        num_chunks = (num_pos - 1) // chunk_size + 1  # ceil(num_pos / chunk_size)
+        return Scores(lhs_pos_scores, rhs_pos_scores, lhs_neg_scores, rhs_neg_scores)
+
+    def forward_direction_agnostic(
+        self,
+        src: EntityList,
+        dst: EntityList,
+        rel: Union[int, LongTensorType],
+        src_entity_type: str,
+        dst_entity_type: str,
+        src_operator: Union[None, AbstractOperator, AbstractDynamicOperator],
+        dst_operator: Union[None, AbstractOperator, AbstractDynamicOperator],
+        src_module: AbstractEmbedding,
+        dst_module: AbstractEmbedding,
+        src_pos: FloatTensorType,
+        dst_pos: FloatTensorType,
+        chunk_size: int,
+        src_negative_sampling_method: Negatives,
+        dst_negative_sampling_method: Negatives,
+    ):
+        num_pos = len(src)
+        assert len(dst) == num_pos
+
+        src_pos = self.adjust_embs(src_pos, rel, src_entity_type, src_operator)
+        dst_pos = self.adjust_embs(dst_pos, rel, dst_entity_type, dst_operator)
+
+        num_chunks = ceil_of_ratio(num_pos, chunk_size)
         if num_pos < num_chunks * chunk_size:
-            padding = torch.zeros(()).expand(num_chunks * chunk_size - num_pos, self.dim)
-            lhs_pos = torch.cat([lhs_pos, padding], dim=0)
-            rhs_pos = torch.cat([rhs_pos, padding], dim=0)
-            if self.num_dynamic_rels > 0:
-                lhs_r_pos = torch.cat([lhs_r_pos, padding], dim=0)
-                rhs_r_pos = torch.cat([rhs_r_pos, padding], dim=0)
-        lhs_pos = lhs_pos.view(num_chunks, chunk_size, self.dim)
-        rhs_pos = rhs_pos.view(num_chunks, chunk_size, self.dim)
-        if self.num_dynamic_rels > 0:
-            lhs_r_pos = lhs_r_pos.view(num_chunks, chunk_size, self.dim)
-            rhs_r_pos = rhs_r_pos.view(num_chunks, chunk_size, self.dim)
+            padding = torch.zeros(()).expand((num_chunks * chunk_size - num_pos, self.dim))
+            src_pos = torch.cat((src_pos, padding), dim=0)
+            dst_pos = torch.cat((dst_pos, padding), dim=0)
+        src_pos = src_pos.view((num_chunks, chunk_size, self.dim))
+        dst_pos = dst_pos.view((num_chunks, chunk_size, self.dim))
 
-        if self.num_dynamic_rels == 0:
-            lhs_neg, lhs_ignore_mask = self.prepare_negatives(
-                lhs, lhs_pos, lhs_module, negative_sampling_method,
-                self.num_uniform_negs, rel=rel, side=Side.LHS)
-            rhs_neg, rhs_ignore_mask = self.prepare_negatives(
-                rhs, rhs_pos, rhs_module, negative_sampling_method,
-                self.num_uniform_negs, rel=rel, side=Side.RHS)
-            pos_scores, lhs_neg_scores, rhs_neg_scores = self.comparator(
-                lhs_pos, rhs_pos, lhs_neg, rhs_neg)
-            lhs_pos_scores = rhs_pos_scores = pos_scores
+        src_neg, src_ignore_mask = self.prepare_negatives(
+            src, src_pos, src_module, src_negative_sampling_method,
+            self.num_uniform_negs, rel, src_entity_type, src_operator)
+        dst_neg, dst_ignore_mask = self.prepare_negatives(
+            dst, dst_pos, dst_module, dst_negative_sampling_method,
+            self.num_uniform_negs, rel, dst_entity_type, dst_operator)
 
-        else:
-            lhs_neg, lhs_ignore_mask = self.prepare_negatives(
-                lhs, lhs_pos, lhs_module, negative_sampling_method,
-                self.num_uniform_negs, rel=None, side=Side.LHS)
-            rhs_neg, rhs_ignore_mask = self.prepare_negatives(
-                rhs, rhs_pos, rhs_module, negative_sampling_method,
-                self.num_uniform_negs, rel=None, side=Side.RHS)
-            lhs_pos_scores, lhs_neg_scores, _ = self.comparator(
-                lhs_pos, rhs_r_pos, lhs_neg, torch.empty((num_chunks, 0, self.dim)))
-            rhs_pos_scores, _, rhs_neg_scores = self.comparator(
-                lhs_r_pos, rhs_pos, torch.empty((num_chunks, 0, self.dim)), rhs_neg)
+        pos_scores, src_neg_scores, dst_neg_scores = \
+            self.comparator(src_pos, dst_pos, src_neg, dst_neg)
 
         # The masks tell us which negative scores (i.e., scores for non-existing
         # edges) must be ignored because they come from pairs we don't actually
         # intend to compare (say, positive pairs or interactions with padding).
         # We do it by replacing them with a "very negative" value so that they
         # are considered spot-on predictions with minimal impact on the loss.
-        for ignore_mask in lhs_ignore_mask:
-            lhs_neg_scores[ignore_mask] = -1e9
-        for ignore_mask in rhs_ignore_mask:
-            rhs_neg_scores[ignore_mask] = -1e9
+        for ignore_mask in src_ignore_mask:
+            src_neg_scores[ignore_mask] = -1e9
+        for ignore_mask in dst_ignore_mask:
+            dst_neg_scores[ignore_mask] = -1e9
 
         # De-chunk the scores and ignore the ones whose positives were padding.
-        lhs_pos_scores = lhs_pos_scores.flatten(0, 1)[:num_pos]
-        rhs_pos_scores = rhs_pos_scores.flatten(0, 1)[:num_pos]
-        lhs_neg_scores = lhs_neg_scores.flatten(0, 1)[:num_pos]
-        rhs_neg_scores = rhs_neg_scores.flatten(0, 1)[:num_pos]
+        pos_scores = pos_scores.flatten(0, 1)[:num_pos]
+        src_neg_scores = src_neg_scores.flatten(0, 1)[:num_pos]
+        dst_neg_scores = dst_neg_scores.flatten(0, 1)[:num_pos]
 
-        lhs_loss, lhs_margin = self.loss_fn(lhs_pos_scores, lhs_neg_scores)
-        rhs_loss, rhs_margin = self.loss_fn(rhs_pos_scores, rhs_neg_scores)
-        loss = relation.weight * (lhs_loss + rhs_loss)
-
-        return loss, (lhs_margin, rhs_margin), \
-            (lhs_pos_scores.unsqueeze(-1), rhs_pos_scores.unsqueeze(-1),
-             lhs_neg_scores, rhs_neg_scores)
+        return pos_scores, src_neg_scores, dst_neg_scores
 
 
 def make_model(config: ConfigSchema) -> MultiRelationEmbedder:
@@ -1138,22 +1075,37 @@ def make_model(config: ConfigSchema) -> MultiRelationEmbedder:
             (config.batch_size, config.num_batch_negs)
         )
 
-    model = MultiRelationEmbedder(
+    lhs_operators: List[Optional[Union[AbstractOperator, AbstractDynamicOperator]]] = []
+    rhs_operators: List[Optional[Union[AbstractOperator, AbstractDynamicOperator]]] = []
+    for r in config.relations:
+        lhs_operators.append(
+            instantiate_operator(r.operator, Side.LHS, num_dynamic_rels, config.dimension))
+        rhs_operators.append(
+            instantiate_operator(r.operator, Side.RHS, num_dynamic_rels, config.dimension))
+
+    if config.comparator is Comparator.DOT:
+        comparator = DotComparator()
+    elif config.comparator is Comparator.COS:
+        comparator = CosComparator()
+    else:
+        raise NotImplementedError("Unknown comparator: %s" % config.comparator)
+
+    if config.bias:
+        comparator = BiasedComparator(comparator)
+
+    return MultiRelationEmbedder(
         config.dimension,
         config.relations,
         config.entities,
         num_uniform_negs=config.num_uniform_negs,
         num_batch_negs=config.num_batch_negs,
-        margin=config.margin,
-        comparator=config.comparator,
+        lhs_operators=lhs_operators,
+        rhs_operators=rhs_operators,
+        comparator=comparator,
         global_emb=config.global_emb,
         max_norm=config.max_norm,
-        loss_fn=config.loss_fn,
-        bias=config.bias,
         num_dynamic_rels=num_dynamic_rels,
     )
-    model.share_memory()
-    return model
 
 
 @contextmanager

@@ -4,12 +4,12 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import gzip
 import os
-import tarfile
 import shutil
+import tarfile
 import urllib.request
 from typing import Callable, Optional
 
@@ -21,6 +21,12 @@ def extract_gzip(gzip_path: str, remove_finished: bool = False) -> str:
     fpath, ext = os.path.splitext(gzip_path)
     if ext != ".gz":
         raise RuntimeError("Not a gzipped file")
+
+    if os.path.exists(fpath):
+        print("Found a file that indicates that the input data "
+              "has already been extracted, not doing it again.")
+        print("This file is: %s" % fpath)
+        return fpath
 
     with open(fpath, "wb") as out_bf, gzip.GzipFile(gzip_path) as zip_f:
         shutil.copyfileobj(zip_f, out_bf)

@@ -4,11 +4,14 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 from unittest import TestCase, main
 
-from torchbiggraph.util import split_almost_equally
+from torchbiggraph.util import (
+    round_up_to_nearest_multiple,
+    split_almost_equally,
+)
 
 
 class TestSplitAlmostEqually(TestCase):
@@ -30,6 +33,18 @@ class TestSplitAlmostEqually(TestCase):
             list(split_almost_equally(23, num_parts=4)),
             [slice(0, 6), slice(6, 12), slice(12, 18), slice(18, 23)],
         )
+
+
+class TestRoundUpToNearestMultiple(TestCase):
+
+    def test_exact(self):
+        self.assertEqual(round_up_to_nearest_multiple(24, 4), 24)
+
+    def test_more(self):
+        self.assertEqual(round_up_to_nearest_multiple(25, 4), 28)
+
+    def test_fewer(self):
+        self.assertEqual(round_up_to_nearest_multiple(23, 4), 24)
 
 
 if __name__ == '__main__':

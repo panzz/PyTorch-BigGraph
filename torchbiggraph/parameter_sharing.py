@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import queue
 import time
@@ -16,10 +16,9 @@ import torch.distributed as td
 import torch.multiprocessing as mp
 import torch.nn as nn
 
-from .distributed import Startable, init_process_group
-from .types import CharTensorType, Rank, ModuleStateDict
-from .util import log
-
+from torchbiggraph.distributed import Startable, init_process_group
+from torchbiggraph.types import CharTensorType, ModuleStateDict, Rank
+from torchbiggraph.util import log
 
 ################################################################################
 # Generic parameter client-server protocol
@@ -247,7 +246,7 @@ class ParameterClient:
         td.send(src, self.server_rank)
         td.recv(dst, src=self.server_rank)
         # log("Swapped %d bytes to %d in %g s" %
-        #     (src.nelement(), self.server_rank, time.time() - tic))
+        #     (src.numel() * src.element_size(), self.server_rank, time.time() - tic))
 
     def join(self) -> None:
         """All clients should call join at the end, which will allow the server
@@ -361,8 +360,9 @@ def _client_thread_loop(
                 pass
 
             for k, v in params.items():
-                bytes_transferred += v.nelement() * 4  # assume float
-                if v.nelement() * 4 > MIN_BYTES_TO_SHARD:
+                param_size = v.numel() * v.element_size()
+                bytes_transferred += param_size
+                if param_size > MIN_BYTES_TO_SHARD:
                     chunks = v.chunk(len(clients), dim=0)
                     for client, chunk in zip(clients, chunks):
                         client.update(k, chunk)
@@ -432,5 +432,5 @@ class ParameterSharer:
         for k, v in ModuleStateDict(model.state_dict()).items():
             if v._cdata not in shared_parameters:
                 shared_parameters.add(v._cdata)
-                log("Adding %s (%d params) to parameter server" % (k, v.nelement()))
+                log("Adding %s (%d params) to parameter server" % (k, v.numel()))
                 self.set_param(k, v.data)

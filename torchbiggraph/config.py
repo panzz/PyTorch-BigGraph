@@ -4,7 +4,7 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 import argparse
 import importlib.util
@@ -16,8 +16,17 @@ from typing import Any, ClassVar, Dict, List, Optional
 import attr
 from attr.validators import optional
 
-from .schema import DeepTypeError, Schema, schema, non_negative, positive, \
-    non_empty, extract_nested_type, inject_nested_value
+from torchbiggraph.schema import (
+    DeepTypeError,
+    Schema,
+    extract_nested_type,
+    has_origin,
+    inject_nested_value,
+    non_empty,
+    non_negative,
+    positive,
+    schema,
+)
 
 
 class Operator(Enum):
@@ -385,7 +394,8 @@ class ConfigSchema(Schema):
                                  "relation type must be defined.")
         # TODO Check that all partitioned entity types have the same number of partitions
         # TODO Check that the batch size is a multiple of the batch negative number
-        # TODO Warn if cos comparator is used with logistic loss.
+        if self.loss_fn is LossFunction.LOGISTIC and self.comparator is Comparator.COS:
+            print("WARNING: You have logistic loss and cosine distance. Are you sure?")
 
 
 def get_config_dict_from_module(config_filename: str) -> Any:
@@ -408,7 +418,7 @@ def override_config_dict(config_dict: Any, overrides: List[str]) -> Any:
             # this is a bit of a hack; we should do something better
             # but this is convenient for specifying lists of strings
             # e.g. edge_paths
-            if isinstance(param_type, type) and issubclass(param_type, list):
+            if has_origin(param_type, list):
                 value = value.split(",")
             # Convert numbers (caution: ignore bools, which are ints)
             if isinstance(param_type, type) \
@@ -432,7 +442,7 @@ def parse_config(config_filename: str, overrides: Optional[List[str]] = None) ->
         print(str(err), file=sys.stderr)
         exit(1)
     # Late import to avoid circular dependency.
-    from . import util
+    from torchbiggraph import util
     util._verbosity_level = config.verbose
     return config
 

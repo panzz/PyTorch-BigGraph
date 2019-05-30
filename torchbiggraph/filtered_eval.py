@@ -4,20 +4,19 @@
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# LICENSE.txt file in the root directory of this source tree.
 
 from collections import defaultdict
-from typing import Dict, List, Union, Tuple
-
-import torch
-from torch_extensions.tensorlist.tensorlist import TensorList
+from typing import Dict, List, Tuple
 
 from torchbiggraph.config import ConfigSchema
-from torchbiggraph.eval import RankingEvaluator, EvalStats
+from torchbiggraph.edgelist import EdgeList
+from torchbiggraph.eval import RankingEvaluator
 from torchbiggraph.fileio import EdgeReader
-from torchbiggraph.model import Margins, Scores
+from torchbiggraph.model import Scores
+from torchbiggraph.stats import Stats
+from torchbiggraph.types import Partition
 from torchbiggraph.util import log
-from torchbiggraph.types import Partition, FloatTensorType, LongTensorType
 
 
 class FilteredRankingEvaluator(RankingEvaluator):
@@ -29,6 +28,7 @@ class FilteredRankingEvaluator(RankingEvaluator):
     """
 
     def __init__(self, config: ConfigSchema, filter_paths: List[str]):
+        super().__init__()
         if len(config.relations) != 1 or len(config.entities) != 1:
             raise RuntimeError("Filtered ranking evaluation should only be used "
                                "with dynamic relations and one entity type.")
@@ -47,14 +47,14 @@ class FilteredRankingEvaluator(RankingEvaluator):
             log("Building links map from path %s" % path)
             e_reader = EdgeReader(path)
             # Assume unpartitioned.
-            lhs, rhs, rel = e_reader.read(Partition(0), Partition(0))
-            num_edges = lhs.size(0)
-            for i in range(num_edges):
+            edges = e_reader.read(Partition(0), Partition(0))
+            for idx in range(len(edges)):
                 # Assume non-featurized.
-                cur_lhs = lhs[i].collapse(is_featurized=False).item()
-                cur_rel = rel[i].item()
+                cur_lhs = int(edges.lhs.to_tensor()[idx])
+                # Assume dynamic relations.
+                cur_rel = int(edges.rel[idx])
                 # Assume non-featurized.
-                cur_rhs = rhs[i].collapse(is_featurized=False).item()
+                cur_rhs = int(edges.rhs.to_tensor()[idx])
 
                 self.lhs_map[cur_lhs, cur_rel].append(cur_rhs)
                 self.rhs_map[cur_rhs, cur_rel].append(cur_lhs)
@@ -64,27 +64,25 @@ class FilteredRankingEvaluator(RankingEvaluator):
     def eval(
         self,
         scores: Scores,
-        margins: Margins,
-        batch_lhs: Union[FloatTensorType, TensorList],
-        batch_rhs: Union[FloatTensorType, TensorList],
-        batch_rel: Union[int, LongTensorType],
-    ) -> EvalStats:
-        # Assume dynamic relations.
-        assert isinstance(batch_rel, torch.LongTensor)
-        b = batch_lhs.size(0)
-        for idx in range(b):
-            cur_lhs = batch_lhs[idx].item()
-            cur_rel = batch_rel[idx].item()
-            cur_rhs = batch_rhs[idx].item()
+        batch_edges: EdgeList,
+    ) -> Stats:
+        for idx in range(len(batch_edges)):
+            # Assume non-featurized.
+            cur_lhs = int(batch_edges.lhs.to_tensor()[idx])
+            # Assume dynamic relations.
+            cur_rel = int(batch_edges.rel[idx])
+            # Assume non-featurized.
+            cur_rhs = int(batch_edges.rhs.to_tensor()[idx])
+
             rhs_edges_filtered = self.lhs_map[cur_lhs, cur_rel]
             lhs_edges_filtered = self.rhs_map[cur_rhs, cur_rel]
+            assert cur_lhs in lhs_edges_filtered
+            assert cur_rhs in rhs_edges_filtered
 
             # The rank is computed as the number of non-negative margins (as
             # that means a negative with at least as good a score as a positive)
             # so to avoid counting positives we give them a negative margin.
-            margins[0][idx][lhs_edges_filtered] = -1
-            margins[1][idx][rhs_edges_filtered] = -1
-            assert cur_lhs in lhs_edges_filtered
-            assert cur_rhs in rhs_edges_filtered
+            scores.lhs_neg[idx][lhs_edges_filtered] = -1e9
+            scores.rhs_neg[idx][rhs_edges_filtered] = -1e9
 
-        return super().eval(scores, margins, batch_lhs, batch_rhs, batch_rel)
+        return super().eval(scores, batch_edges)
